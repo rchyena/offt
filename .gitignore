@@ -31,3 +31,8 @@
 # Debug files
 *.dSYM/
 *.su
+
+# Harmony subdirectory
+ah-4.6.0.tar.gz
+activeharmony-4.6.0/
+

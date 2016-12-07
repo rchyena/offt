@@ -27,9 +27,6 @@
 
 #ifdef AH_TUNING
 #include "hclient.h"
-#include "hmesg.h"
-#include "hsession.h"
-#include "hval.h"
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -742,18 +739,16 @@ void write_initial_simplex(struct _offt_plan *po, int** v_list, int *v_list_size
  @ main routine for auto-tuning
    ********************************************************** */
 int ah_tuning(struct _offt_plan *po, double *in, double *out) {
-  hsession_t sess;
-  hdesc_t *hdesc = NULL;
-  const char *name, *retstr;
-  int retval;
+  hdesc_t* hdesc;
+  hdef_t* hdef;
+  htask_t* htask;
+  int retval = 0;
   int loop_count = 0;
   int every_loop_count = 0;
-  name = "fft";
   long ahv[PARAM_COUNT] = {0,};
   int rank = po->rank;
   int exp_num = 0;
   MPI_Datatype MPI_OVERLAP_PARAMS;
-  pid_t svr_pid;
 
   if (rank)
     goto ah_loop;
@@ -769,88 +764,60 @@ int ah_tuning(struct _offt_plan *po, double *in, double *out) {
   printf("point_database_file %s\n", po->point_database_file);
   printf("user_vertex_file %s\n", po->user_vertex_file);
 
-  /* initialize ah client */
-  hsession_init(&sess);
-  if (hsession_name(&sess, "fft") < 0) {
-    fprintf(stderr, "Could not set session name.\n");
-    return -1;
+  /* Initialize search definition */
+  hdef = ah_def_alloc();
+  if (!hdef) {
+      fprintf(stderr, "Could not allocate search definition\n");
+      return -1;
   }
-  /* define parameter range */
+
+  /* Define parameter range */
   int *v_list[PARAM_COUNT], v_list_size[PARAM_COUNT];
   params_range_setup(po, v_list, v_list_size);
+
   int i;
   for (i = 0; i < PARAM_COUNT; i++) {
     char str[4];
     sprintf(str, "V%02d", i);
-    hsession_int(&sess, str, 0, v_list_size[i] - 1, 1);
+    ah_def_int(hdef, str, 0, v_list_size[i] - 1, 1, NULL);
   }
   switch (po->ah_strategy) {
-  case 0: hsession_strategy(&sess, "nm.so"); break;
-  case 1: hsession_strategy(&sess, "pro.so"); break;
-  case 2: hsession_strategy(&sess, "random.so"); break;
-  case 3: hsession_strategy(&sess, "brute.so"); break;
+  case 0: ah_def_strategy(hdef, "nm.so"); break;
+  case 1: ah_def_strategy(hdef, "pro.so"); break;
+  case 2: ah_def_strategy(hdef, "random.so"); break;
+  case 3: ah_def_strategy(hdef, "brute.so"); break;
   }
   /* set initial simplex */
-  hcfg_set(sess.cfg, "SHSONG_USER_VERTEX_FILE", po->user_vertex_file);
+  ah_def_cfg(hdef, "SHSONG_USER_VERTEX_FILE", po->user_vertex_file);
   if (po->ah_strategy == 0 || po->ah_strategy == 1) /* only for nm or pro */
     write_initial_simplex(po, v_list, v_list_size);
-  retstr = hsession_launch(&sess, NULL, 0);
-#if 0 /* launch hserver */
-  if (retstr) {
-    fprintf(stderr, "Could not launch tuning session: %s\n", retstr);
-    return -1;
-  }
-#else
-  if (retstr) {
-#if defined(SHSONG_HOPPER)
-    char *argv[2] = { "./activeharmony/bin/hserver", NULL };
-#elif defined(SHSONG_EDISON)
-    char *argv[2] = { "./activeharmony/bin/hserver", NULL };
-#else
-    char *argv[2] = { "./activeharmony/bin/hserver", NULL };
-#endif
-    svr_pid = launch_silent(argv[0], argv);
-#if defined(SHSONG_HOPPER)
-    int itry = 0;
-    for (itry = 0; itry < 4; i++) {
-      sleep(itry + 1);
-      retstr = hsession_launch(&sess, NULL, 0);
-      if (!retstr) break;
-      fprintf(stderr, "Failed to retry %d hession_launch (%d).\n", itry, svr_pid);
-    }
-    if (itry == 4) {
-      if (svr_pid && kill(svr_pid, SIGKILL) < 0)
-        fprintf(stderr, "Could not kill server process (%d).\n", svr_pid);
-      return -1;
-    }
-#else
-    sleep(2);
-    retstr = hsession_launch(&sess, NULL, 0);
-    if (retstr) {
-      fprintf(stderr, "Failed to retry hession_launch (%d).\n", svr_pid);
-      if (svr_pid && kill(svr_pid, SIGKILL) < 0)
-        fprintf(stderr, "Could not kill server process (%d).\n", svr_pid);
-      return -1;
-    }
-#endif
-  }
-#endif
+
   printf("Starting Harmony...\n");
-  hdesc = harmony_init();
+
+  hdesc = ah_alloc();
   if (hdesc == NULL) {
-    fprintf(stderr, "Failed to initialize a harmony session.\n");
-    return -1;
+    fprintf(stderr, "Failed to allocate a Harmony descriptor\n");
+    retval = -1;
+    goto cleanup;
   }
+
+  if (ah_connect(hdesc, NULL, 0) != 0) {
+    fprintf(stderr, "Could not connect to Harmony server: %s\n", ah_error());
+    retval = -1;
+    goto cleanup;
+  }
+
+  htask = ah_start(hdesc, hdef);
+  if (!htask) {
+    fprintf(stderr, "Could not initiate a Harmony search: %s\n", ah_error());
+    retval = -1;
+    goto cleanup;
+  }
+
   for (i = 0; i < PARAM_COUNT; i++) {
     char str[4];
     sprintf(str, "V%02d", i);
-    harmony_bind_int(hdesc, str, &ahv[i]);
-  }
-  if (harmony_join(hdesc, NULL, 0, name) < 0) {
-    fprintf(stderr, "Could not connect to harmony server: %s\n",
-      harmony_error_string(hdesc));
-    retval = -1;
-    goto cleanup;
+    ah_bind_int(htask, str, &ahv[i]);
   }
 
   remove(po->point_database_file);
@@ -890,12 +857,12 @@ ah_loop:
       po->params->is_infeasible = 0;
       po->params->is_in_database = 0;
       /* check convergence */
-      if (loop_count >= po->max_loop || every_loop_count >= po->max_loop * 10 || harmony_converged(hdesc)) {
+      if (loop_count >= po->max_loop || every_loop_count >= po->max_loop * 10 || ah_converged(htask)) {
         po->params->is_converged = 1;
         printf("converged loop_count %d\n", loop_count);
       } else {
         /* retrieve point */
-        harmony_fetch(hdesc);
+        ah_fetch(htask);
         /* convert bwd */
         params_convert(1, po->params->v, ahv, po, v_list, v_list_size);
         print_params(po->params->v);
@@ -987,13 +954,13 @@ ah_loop:
       //printf("perf = %.5f\n", perf);
       if (!po->params->is_infeasible && !po->params->is_in_database)
         write_to_database(po, perf);
-      harmony_report(hdesc, perf);
+      ah_report(htask, &perf);
     }
   } // end of while (1)
 
   /* retrieve the best point */
   if (!rank) {
-    harmony_best(hdesc);
+    ah_best(htask);
     /* convert bwd */
     params_convert(1, po->params->v, ahv, po, v_list, v_list_size);
   }
@@ -1006,18 +973,17 @@ ah_loop:
       printf("@ BEST %.5f\n", perf);
     }
   }
-  if (!rank && harmony_leave(hdesc) < 0) {
+  if (!rank && ah_leave(htask) < 0) {
     fprintf(stderr, "Failed to disconnect from harmony server.\n");
     retval = -1;
   }
+
 cleanup:
   if (!rank) {
-    harmony_fini(hdesc);
+    ah_close(hdesc);
     for (i = 0; i < PARAM_COUNT; i++)
       free(v_list[i]);
-    if (svr_pid && kill(svr_pid, SIGKILL) < 0)
-      fprintf(stderr, "!Could not kill server process (%d).\n", svr_pid);
   }
-  return 0;
+  return retval;
 }
 #endif // AH_TUNING
