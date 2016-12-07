@@ -1,0 +1,7 @@
+client_api/example_c
+client_api/example_f
+client_api/example_chpl
+code_generation/gemm
+synth/synth
+unique_points.tuna.dat
+*.log
